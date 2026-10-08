@@ -65,8 +65,8 @@ impl ProbeSet {
             .build()?;
         let tasks = assertions
             .iter()
-            .cloned()
             .map(|assertion| {
+                let assertion = assertion.clone();
                 let task_cancellation = cancellation.clone();
                 let task_client = client.clone();
                 let task_telemetry = telemetry.clone();

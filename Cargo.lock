@@ -374,6 +374,7 @@ name = "chaos_hft"
 version = "0.4.2"
 dependencies = [
  "anyhow",
+ "chrono",
  "rand",
  "serde",
  "serde_json",

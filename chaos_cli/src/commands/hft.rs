@@ -1,5 +1,8 @@
 use anyhow::{bail, Context, Result};
-use chaos_hft::{evidence, FixFault, FixMessage, InvariantBudget, MarketEvent, MarketFaultPlan};
+use chaos_hft::{
+    evidence, import_fix_capture, FixFault, FixImportOptions, FixMessage, InvariantBudget,
+    MarketEvent, MarketFaultPlan,
+};
 use clap::{Args, Subcommand};
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
@@ -12,6 +15,20 @@ pub struct HftArgs {
 
 #[derive(Debug, Subcommand)]
 enum HftCommand {
+    /// Convert supported FIX 4.4 execution reports to JSON Lines market events
+    ImportFix {
+        /// One pipe- or SOH-delimited FIX execution report per line
+        input: PathBuf,
+        /// Venue identifier for the captured session
+        #[arg(long)]
+        venue: String,
+        /// Decimal places in integer price ticks (2 means one tick is 0.01)
+        #[arg(long, default_value_t = 2)]
+        price_scale: u32,
+        /// Output JSON Lines fixture for hft replay
+        #[arg(short, long)]
+        output: PathBuf,
+    },
     /// Replay market events through deterministic faults and prove restoration
     Replay {
         /// JSON Lines market-event fixture
@@ -44,6 +61,12 @@ enum HftCommand {
 
 pub async fn execute(args: HftArgs) -> Result<()> {
     match args.command {
+        HftCommand::ImportFix {
+            input,
+            venue,
+            price_scale,
+            output,
+        } => import_fix_events(&input, &output, venue, price_scale).await,
         HftCommand::Replay {
             events,
             fault_plan,
@@ -66,6 +89,31 @@ pub async fn execute(args: HftArgs) -> Result<()> {
             output,
         } => apply_fix_faults(&input, &fault_plan, &output).await,
     }
+}
+
+async fn import_fix_events(
+    input_path: &Path,
+    output_path: &Path,
+    venue: String,
+    price_scale: u32,
+) -> Result<()> {
+    let contents = tokio::fs::read_to_string(input_path)
+        .await
+        .with_context(|| format!("read FIX capture from '{}'", input_path.display()))?;
+    let events = import_fix_capture(&contents, &FixImportOptions { venue, price_scale })
+        .with_context(|| format!("import FIX capture from '{}'", input_path.display()))?;
+    let mut output = Vec::new();
+    for event in &events {
+        serde_json::to_writer(&mut output, event)?;
+        output.push(b'\n');
+    }
+    write_file(output_path, &output).await?;
+    println!(
+        "Imported {} FIX execution reports into '{}'",
+        events.len(),
+        output_path.display()
+    );
+    Ok(())
 }
 
 async fn replay_events(
@@ -186,6 +234,77 @@ async fn write_file(path: &Path, contents: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn imported_fix_fixture_proves_disruption_and_restoration() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "chaos-fix-import-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let events = directory.join("market-events.jsonl");
+        let output = directory.join("evidence.json");
+        import_fix_events(
+            &root.join("tests/hft-evidence/executions.fix"),
+            &events,
+            "SIM".into(),
+            2,
+        )
+        .await
+        .unwrap();
+        replay_events(
+            &events,
+            &root.join("tests/hft-evidence/sequence-gap.yaml"),
+            None,
+            Some(&output),
+            false,
+        )
+        .await
+        .unwrap();
+        let report: chaos_hft::ExperimentEvidence =
+            serde_json::from_slice(&tokio::fs::read(&output).await.unwrap()).unwrap();
+        assert_eq!(report.baseline.events, 4);
+        assert!(report.baseline.passed);
+        assert!(report.disruption_observed);
+        assert!(report.restoration_verified);
+        assert_eq!(report.chaos.sequence_gaps, 1);
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_fix_capture_preserves_existing_output() {
+        let directory = std::env::temp_dir().join(format!(
+            "chaos-fix-import-invalid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        let input = directory.join("capture.fix");
+        let output = directory.join("events.jsonl");
+        tokio::fs::write(
+            &input,
+            "8=FIX.4.4|35=8|34=1|55=ACME|11=order-1|150=0|60=20261008-09:00:00|\ninvalid\n",
+        )
+        .await
+        .unwrap();
+        tokio::fs::write(&output, "existing fixture").await.unwrap();
+        let error = import_fix_events(&input, &output, "SIM".into(), 2)
+            .await
+            .unwrap_err();
+        assert!(format!("{error:#}").contains("line 2"));
+        assert_eq!(
+            tokio::fs::read_to_string(&output).await.unwrap(),
+            "existing fixture"
+        );
+        tokio::fs::remove_dir_all(directory).await.unwrap();
+    }
 
     #[tokio::test]
     async fn checked_in_hft_fixture_proves_disruption_and_restoration() {

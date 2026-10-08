@@ -6,6 +6,7 @@ All notable changes are documented here. This project follows semantic versionin
 
 ### Added
 
+- FIX 4.4 execution-report capture import into deterministic market-event JSONL, with exact decimal price scaling, UTC nanosecond timestamps, and replay disruption/restoration evidence.
 - Capacity-zero pipeline replay that measures real producer backpressure without an intermediate queue.
 - Generic JSONL integrity evidence for record loss, duplication, reordering, truncation, timestamp regression, field corruption, partition outage, sequence reset, cardinality explosion, and hot-key collapse.
 - Searchable pipeline, CDC, WebSocket, gRPC, GraphQL, Redis/Valkey, OpenTelemetry, and crypto exchange scenario packs.
